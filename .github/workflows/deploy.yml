@@ -1,0 +1,87 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Deploy via SSH
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USER }}
+        key: ${{ secrets.EC2_KEY }}
+        script: |
+          APP_DIR=~/ci-cd-pipeline-app     # your app folder on EC2
+          SERVICE_NAME=chiedozieapp        # unique service name
+          REPO_URL=https://github.com/Doziechucks/CI-CD-pipleine.git
+          VENV_DIR=$APP_DIR/venv
+          
+          # go to app folder (create if missing)
+          mkdir -p $APP_DIR
+          cd $APP_DIR
+
+          # ensure Python venv package exists
+          if ! dpkg -s python3.12-venv >/dev/null 2>&1; then
+              sudo apt update
+              sudo apt install -y python3.12-venv
+          fi
+
+          # ensure Git exists
+          if ! dpkg -s git >/dev/null 2>&1; then
+              sudo apt update
+              sudo apt install -y git
+          fi
+
+          # pull latest code
+          if [ -d .git ]; then
+            git reset --hard
+            git pull
+          else
+            git clone $REPO_URL .
+          fi
+
+          # setup virtual environment if missing
+          if [ ! -d "$VENV_DIR" ]; then
+            sudo apt update
+            sudo apt install -y python3.12-venv python3-pip
+            python3 -m venv $VENV_DIR
+          fi
+
+          source $VENV_DIR/bin/activate
+
+          # install requirements
+          pip install --upgrade pip
+          pip install flask gunicorn
+
+          # create systemd service if not exists
+          if [ ! -f /etc/systemd/system/$SERVICE_NAME.service ]; then
+            sudo bash -c "cat > /etc/systemd/system/$SERVICE_NAME.service <<EOF
+            [Unit]
+            Description=Chiedozie Flask App
+            After=network.target
+
+            [Service]
+            User=ubuntu
+            WorkingDirectory=$APP_DIR
+            Environment=\"PATH=$VENV_DIR/bin\"
+            ExecStart=$VENV_DIR/bin/gunicorn -b 0.0.0.0:8080 app:app
+
+            [Install]
+            WantedBy=multi-user.target
+            EOF"
+            sudo systemctl daemon-reload
+            sudo systemctl enable $SERVICE_NAME
+          fi
+
+          # restart service
+          sudo systemctl restart $SERVICE_NAME
+          sudo systemctl status $SERVICE_NAME --no-pager
+
