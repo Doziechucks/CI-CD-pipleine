@@ -1,241 +1,68 @@
-script: |
-  set -e
-  echo "🚀 Starting deployment to EC2..."
-  
-  # Update system packages
-  sudo apt-get update -y
-  sudo apt-get install -y python3-pip python3-venv git curl nginx
-  
-  # Create deployment directory
-  echo "📁 Creating deployment directory..."
-  sudo mkdir -p $DEPLOY_DIR
-  sudo chown ubuntu:ubuntu $DEPLOY_DIR
-  cd $DEPLOY_DIR
-  
-  # Clone or update repository
-  echo "📥 Cloning or updating repository..."
-  if [ ! -d "ci-cd-pipeline" ]; then
-    echo "Cloning repository..."
-    git clone https://github.com/Doziechucks/CI-CD-pipleine.git ci-cd-pipeline
-    cd ci-cd-pipeline
-  else
-    echo "Pulling latest changes..."
-    cd ci-cd-pipeline
-    git pull origin main
-  fi
-  
-  # Verify required files exist
-  echo "✅ Verifying required files..."
-  if [ ! -f "app.py" ]; then
-    echo "❌ ERROR: app.py not found!"
-    ls -la
-    exit 1
-  fi
-  if [ ! -f "requirements.txt" ]; then
-    echo "❌ ERROR: requirements.txt not found!"
-    ls -la
-    exit 1
-  fi
-  if [ ! -d "templates" ] || [ ! -f "templates/index.html" ]; then
-    echo "❌ ERROR: templates/index.html not found!"
-    ls -la templates/ 2>/dev/null || echo "No templates directory"
-    exit 1
-  fi
-  
-  echo "✅ All required files found!"
-  echo "📄 File structure:"
-  ls -la
-  ls -la templates/
-  
-  # Set up Python virtual environment
-  echo "🐍 Setting up Python environment..."
-  if [ ! -d "venv" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv venv
-  else
-    echo "Virtual environment already exists"
-  fi
-  
-  # Activate venv and install dependencies
-  source venv/bin/activate
-  echo "📦 Installing Python dependencies..."
-  pip install --upgrade pip
-  pip install -r requirements.txt
-  pip install gunicorn
-  echo "✅ Dependencies installed successfully"
-  
-  # Test Flask app locally on EC2
-  echo "🧪 Testing Flask app locally..."
-  python app.py &
-  APP_PID=$!
-  sleep 5
-  
-  if curl -f http://localhost:5000/ > /dev/null 2>&1; then
-    echo "✅ Local Flask test PASSED on port 5000!"
-    curl -s http://localhost:5000/ | head -20
-    kill $APP_PID
-  else
-    echo "⚠️  Local Flask test failed on port 5000, checking logs..."
-    ps aux | grep "python app.py"
-    kill $APP_PID 2>/dev/null || true
-    echo "⚠️  Continuing with deployment anyway..."
-  fi
-  
-  # Create systemd service for production (Gunicorn on port 8080)
-  echo "⚙️  Creating systemd service for production..."
-  sudo tee /etc/systemd/system/flask-app.service > /dev/null << 'EOF'
+name: Deploy to EC2
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Deploy via SSH
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USER }}
+        key: ${{ secrets.EC2_KEY }}
+        script: |
+          APP_DIR=~/app
+          SERVICE_NAME=myapp
+          REPO_URL=https://github.com/Doziechucks/CI-CD-pipeline.git
+          VENV_DIR=$APP_DIR/venv
+          
+          mkdir -p $APP_DIR
+          cd $APP_DIR
+
+          sudo apt update
+          sudo apt install -y python3-venv python3-pip git
+
+          if [ -d .git ]; then
+            git reset --hard
+            git pull
+          else
+            git clone $REPO_URL .
+          fi
+
+          if [ ! -d "$VENV_DIR" ]; then
+            python3 -m venv $VENV_DIR
+          fi
+
+          source $VENV_DIR/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+          if [ ! -f /etc/systemd/system/$SERVICE_NAME.service ]; then
+            sudo bash -c "cat > /etc/systemd/system/$SERVICE_NAME.service <<EOF
 [Unit]
-Description=Flask Web Application
+Description=Flask App
 After=network.target
 
 [Service]
 User=ubuntu
-Group=ubuntu
-WorkingDirectory=/var/www/flask-app/ci-cd-pipeline
-Environment="PATH=/var/www/flask-app/ci-cd-pipeline/venv/bin"
-ExecStart=/var/www/flask-app/ci-cd-pipeline/venv/bin/gunicorn --workers 3 --bind 0.0.0.0:8080 --timeout 120 app:app
-ExecReload=/bin/kill -s HUP \$MAINPID
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=flask-app
+WorkingDirectory=$APP_DIR
+Environment=\"PATH=$VENV_DIR/bin\"
+ExecStart=$VENV_DIR/bin/gunicorn -b 0.0.0.0:8080 app:app
 
 [Install]
 WantedBy=multi-user.target
-EOF
-  
-  # Reload systemd and enable service
-  sudo systemctl daemon-reload
-  sudo systemctl enable flask-app
-  
-  # Start/Restart the Flask app
-  echo "🔄 Starting Flask app service..."
-  sudo systemctl restart flask-app
-  sleep 3
-  echo "📊 Flask service status:"
-  sudo systemctl status flask-app --no-pager -l
-  
-  # Configure Nginx as reverse proxy
-  echo "🌐 Configuring Nginx reverse proxy..."
-  sudo tee /etc/nginx/sites-available/flask-app > /dev/null << 'EOF'
-server {
-    listen 80;
-    server_name _;
+EOF"
+            sudo systemctl daemon-reload
+            sudo systemctl enable $SERVICE_NAME
+          fi
 
-    # Handle Flask app requests
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        
-        # Timeout settings
-        proxy_read_timeout 120s;
-        proxy_connect_timeout 120s;
-        proxy_send_timeout 120s;
-    }
-
-    # Health check endpoint
-    location /health {
-        access_log off;
-        proxy_pass http://127.0.0.1:8080/health;
-    }
-
-    # Static files (if you add any later)
-    location /static {
-        alias /var/www/flask-app/ci-cd-pipeline/static;
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-    }
-}
-EOF
-  
-  # Enable the site and remove default
-  sudo ln -sf /etc/nginx/sites-available/flask-app /etc/nginx/sites-enabled/ || true
-  sudo rm -f /etc/nginx/sites-enabled/default
-  
-  # Test and restart Nginx
-  echo "🔧 Testing and restarting Nginx..."
-  if sudo nginx -t; then
-    echo "✅ Nginx configuration is valid"
-    sudo systemctl restart nginx
-    echo "✅ Nginx restarted successfully"
-    echo "📊 Nginx status:"
-    sudo systemctl status nginx --no-pager -l
-  else
-    echo "❌ Nginx configuration test failed"
-    sudo nginx -t
-    exit 1
-  fi
-  
-  # Wait for services to fully start
-  echo "⏳ Waiting for services to initialize..."
-  sleep 5
-  
-  # Comprehensive health checks
-  echo "🔍 Running health checks..."
-  
-  # Check if Flask service is running
-  if sudo systemctl is-active --quiet flask-app; then
-    echo "✅ Flask systemd service is active"
-  else
-    echo "❌ Flask systemd service is not active"
-    sudo systemctl status flask-app --no-pager -l
-    exit 1
-  fi
-  
-  # Check Flask app directly on port 8080
-  if curl -f -m 10 http://localhost:8080/ > /dev/null 2>&1; then
-    echo "✅ Flask app is responding on port 8080"
-    echo "📄 Flask app response preview:"
-    curl -s http://localhost:8080/ | head -20
-  else
-    echo "❌ Flask app is not responding on port 8080"
-    echo "🔍 Checking Flask logs:"
-    sudo journalctl -u flask-app -n 20 --no-pager
-    exit 1
-  fi
-  
-  # Check Nginx proxy
-  if curl -f -m 10 http://localhost/ > /dev/null 2>&1; then
-    echo "✅ Nginx proxy is working correctly"
-    echo "🌐 Full app response via Nginx:"
-    curl -s http://localhost/ | head -10
-  else
-    echo "❌ Nginx proxy is not working"
-    echo "🔍 Checking Nginx logs:"
-    sudo tail -10 /var/log/nginx/error.log
-    exit 1
-  fi
-  
-  # Check health endpoint
-  if curl -f -m 5 http://localhost/health > /dev/null 2>&1; then
-    echo "✅ Health endpoint is working"
-  else
-    echo "⚠️  Health endpoint not responding"
-  fi
-  
-  # Final success message
-  echo ""
-  echo "🎉 DEPLOYMENT COMPLETED SUCCESSFULLY! 🎉"
-  echo "====================================="
-  echo "📁 App Location: $DEPLOY_DIR/ci-cd-pipeline"
-  echo "🐍 Python Environment: $DEPLOY_DIR/ci-cd-pipeline/venv"
-  echo "⚙️  Flask Service: \$(sudo systemctl is-active flask-app)"
-  echo "🌐 Nginx Status: \$(sudo systemctl is-active nginx)"
-  echo ""
-  echo "🌍 Access your app at:"
-  echo "   http://${{ secrets.EC2_HOST }}/ "
-  echo "   http://${{ secrets.EC2_HOST }}/health"
-  echo ""
-  echo "📊 Service Status Commands:"
-  echo "   sudo systemctl status flask-app"
-  echo "   sudo systemctl status nginx"
-  echo "   sudo journalctl -u flask-app -f  (for live logs)"
-  echo ""
-  echo "🔧 Troubleshooting:"
-  echo "   Check Flask logs: sudo journalctl -u flask-app"
-  echo "   Check Nginx logs: sudo tail /var/log/nginx/error.log"
-  echo "   Test Flask directly: curl http://localhost:8080/"
+          sudo systemctl restart $SERVICE_NAME
+          sudo systemctl status $SERVICE_NAME --no-pager
