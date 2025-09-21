@@ -1,4 +1,4 @@
-name: Deploy to EC2
+name: Deploy to EC2 (Direct SCP)
 on:
   push:
     branches: [ "main" ]
@@ -10,11 +10,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      - name: Create deployment package
+      - name: Prepare deployment files
         run: |
-          # Create a deployment archive
-          tar -czf deployment.tar.gz --exclude='.git' --exclude='node_modules' --exclude='__pycache__' .
-          ls -la deployment.tar.gz
+          # Remove files we don't want to deploy
+          rm -rf .git __pycache__ *.pyc .pytest_cache
+          find . -name "*.log" -delete
+          find . -name ".DS_Store" -delete
+          
+          # List what we're deploying
+          echo "Files to be deployed:"
+          find . -type f | head -20
 
       - name: Deploy to EC2
         run: |
@@ -25,9 +30,19 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
           
-          # Copy deployment package to EC2
-          echo "Uploading deployment package..."
-          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no deployment.tar.gz ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:~/
+          # Create app directory on EC2
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "mkdir -p ~/app_new"
+          
+          # Upload files directly using rsync over SSH
+          echo "Uploading files to EC2..."
+          rsync -avz -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no" \
+                --exclude='.git' \
+                --exclude='__pycache__' \
+                --exclude='*.pyc' \
+                --exclude='.pytest_cache' \
+                --exclude='*.log' \
+                --exclude='.DS_Store' \
+                ./ ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:~/app_new/
           
           # Deploy on EC2
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -T ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
@@ -40,25 +55,20 @@ jobs:
           SERVICE_NAME=myapp
           VENV_DIR=$APP_DIR/venv
           
-          # Create app directory and extract code
-          echo "Setting up application directory..."
-          mkdir -p $APP_DIR
-          cd $APP_DIR
-          
-          # Extract the deployment package
-          if [ -f ~/deployment.tar.gz ]; then
-            echo "Extracting deployment package..."
-            tar -xzf ~/deployment.tar.gz
-            rm ~/deployment.tar.gz
-          else
-            echo "No deployment package found!"
-            exit 1
+          # Backup current app if it exists
+          if [ -d "$APP_DIR" ]; then
+            echo "Backing up current application..."
+            mv $APP_DIR ${APP_DIR}_backup_$(date +%Y%m%d_%H%M%S) || true
           fi
+          
+          # Move new version to app directory
+          mv ~/app_new $APP_DIR
+          cd $APP_DIR
           
           # Update system packages
           echo "Updating system..."
           sudo apt update -y
-          sudo apt install -y python3-venv python3-pip nginx
+          sudo apt install -y python3-venv python3-pip nginx rsync
           
           # Setup Python environment
           echo "Setting up Python environment..."
@@ -67,16 +77,6 @@ jobs:
           fi
           source $VENV_DIR/bin/activate
           pip install --upgrade pip
-          
-          # Install dependencies
-          echo "Installing dependencies..."
-          if [ -f requirements.txt ]; then
-            echo "Installing from requirements.txt..."
-            pip install -r requirements.txt
-          else
-            echo "No requirements.txt found, installing basic packages..."
-            pip install flask gunicorn
-          fi
           
           # Check if we have Flask app structure or static site
           if [ -f app.py ] && [ -f requirements.txt ]; then
@@ -115,8 +115,8 @@ jobs:
           }
           NGINXEOF
             
-          elif [ -f index.html ]; then
-            echo "Found index.html - Setting up as static site with Nginx..."
+          else
+            echo "No Flask structure found - Setting up as static site..."
             
             # Copy static files to nginx directory
             sudo mkdir -p /var/www/myapp
@@ -137,7 +137,7 @@ jobs:
                   try_files $uri $uri/ =404;
               }
               
-              # Optional: Add some caching for static assets
+              # Caching for static assets
               location ~* \.(css|js|png|jpg|jpeg|gif|ico|svg)$ {
                   expires 1y;
                   add_header Cache-Control "public, immutable";
@@ -145,59 +145,7 @@ jobs:
           }
           NGINXEOF
             
-            # We don't need systemd service for static site
             SERVICE_NEEDED=false
-            
-          else
-            echo "No app.py or index.html found - Creating minimal Flask app..."
-            # Create a minimal Flask app only as last resort
-            cat > app.py << 'PYEOF'
-          from flask import Flask
-          
-          app = Flask(__name__)
-          
-          @app.route('/')
-          def home():
-              return '''
-              <h1>Chiedozie's CI/CD Pipeline</h1>
-              <p>✅ Deployment Successful!</p>
-              <p>Add your Flask app or index.html to customize this page.</p>
-              '''
-          
-          @app.route('/health')
-          def health():
-              return {'status': 'healthy', 'message': 'Application is running'}
-          
-          if __name__ == '__main__':
-              app.run(host='0.0.0.0', port=8080, debug=False)
-          PYEOF
-            
-            # Install Flask for the minimal app
-            pip install flask gunicorn
-            
-            SERVICE_NEEDED=true
-            
-            # Configure Nginx as reverse proxy for Flask
-            echo "Configuring Nginx for minimal Flask app..."
-            sudo tee /etc/nginx/sites-available/myapp > /dev/null << 'NGINXEOF'
-          server {
-              listen 80;
-              server_name _;
-              
-              location / {
-                  proxy_pass http://127.0.0.1:8080;
-                  proxy_set_header Host $host;
-                  proxy_set_header X-Real-IP $remote_addr;
-                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto $scheme;
-              }
-              
-              location /health {
-                  proxy_pass http://127.0.0.1:8080/health;
-                  access_log off;
-              }
-          }
-          NGINXEOF
           fi
           
           # Create systemd service only if Flask app is needed
@@ -223,8 +171,6 @@ jobs:
           else
             echo "Using static site - no systemd service needed"
           fi
-          
-          # Configure Nginx (done above based on site type)
           
           # Enable Nginx site
           sudo ln -sf /etc/nginx/sites-available/myapp /etc/nginx/sites-enabled/
@@ -253,10 +199,10 @@ jobs:
           sudo systemctl status nginx --no-pager
           
           echo "=== Deployment Complete ==="
-          if [ -f index.html ]; then
-            echo "Your beautiful static site is now live!"
+          if [ -f app.py ]; then
+            echo "Your Flask application is now live!"
           else
-            echo "Flask application is running!"
+            echo "Your static site is now live!"
           fi
           echo "Application should be accessible at: http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)"
           EOF
