@@ -114,6 +114,6 @@ EOF
           if curl -f http://localhost:8080/ > /dev/null 2>&1; then
             echo "✅ Deployment successful!"
           else
-            echo "❌ Health check failed"
+            echo " Health check failed"
             exit 1
           fi
