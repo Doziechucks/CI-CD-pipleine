@@ -24,12 +24,15 @@ jobs:
           REPO_URL=https://github.com/Doziechucks/CI-CD-pipeline.git
           VENV_DIR=$APP_DIR/venv
           
+          # Create app directory
           mkdir -p $APP_DIR
           cd $APP_DIR
 
+          # Install system dependencies
           sudo apt update
           sudo apt install -y python3-venv python3-pip git
 
+          # Clone or update repository
           if [ -d .git ]; then
             git reset --hard
             git pull
@@ -37,16 +40,20 @@ jobs:
             git clone $REPO_URL .
           fi
 
+          # Set up virtual environment
           if [ ! -d "$VENV_DIR" ]; then
             python3 -m venv $VENV_DIR
           fi
 
           source $VENV_DIR/bin/activate
+
+          # Install Python dependencies
           pip install --upgrade pip
           pip install -r requirements.txt
 
+          # Create systemd service using tee
           if [ ! -f /etc/systemd/system/$SERVICE_NAME.service ]; then
-            sudo bash -c "cat > /etc/systemd/system/$SERVICE_NAME.service <<EOF
+            sudo tee /etc/systemd/system/$SERVICE_NAME.service > /dev/null <<EOF
 [Unit]
 Description=Flask App
 After=network.target
@@ -54,15 +61,17 @@ After=network.target
 [Service]
 User=ubuntu
 WorkingDirectory=$APP_DIR
-Environment=\"PATH=$VENV_DIR/bin\"
+Environment="PATH=$VENV_DIR/bin"
 ExecStart=$VENV_DIR/bin/gunicorn -b 0.0.0.0:8080 app:app
 
 [Install]
 WantedBy=multi-user.target
-EOF"
+EOF
             sudo systemctl daemon-reload
             sudo systemctl enable $SERVICE_NAME
           fi
 
+          # Restart and check service
           sudo systemctl restart $SERVICE_NAME
           sudo systemctl status $SERVICE_NAME --no-pager
+
