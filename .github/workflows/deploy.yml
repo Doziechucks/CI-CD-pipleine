@@ -142,7 +142,7 @@ Group=ubuntu
 WorkingDirectory=/var/www/flask-app/ci-cd-pipeline
 Environment="PATH=/var/www/flask-app/ci-cd-pipeline/venv/bin"
 ExecStart=/var/www/flask-app/ci-cd-pipeline/venv/bin/gunicorn --workers 3 --bind 0.0.0.0:8080 --timeout 120 app:app
-ExecReload=/bin/kill -s HUP $MAINPID
+ExecReload=/bin/kill -s HUP \$MAINPID
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -174,10 +174,10 @@ server {
     # Handle Flask app requests
     location / {
         proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
         
         # Timeout settings
         proxy_read_timeout 120s;
@@ -271,8 +271,8 @@ EOF
           echo "====================================="
           echo "📁 App Location: $DEPLOY_DIR/ci-cd-pipeline"
           echo "🐍 Python Environment: $DEPLOY_DIR/ci-cd-pipeline/venv"
-          echo "⚙️  Flask Service: $(sudo systemctl is-active flask-app)"
-          echo "🌐 Nginx Status: $(sudo systemctl is-active nginx)"
+          echo "⚙️  Flask Service: \$(sudo systemctl is-active flask-app)"
+          echo "🌐 Nginx Status: \$(sudo systemctl is-active nginx)"
           echo ""
           echo "🌍 Access your app at:"
           echo "   http://${{ secrets.EC2_HOST }}/ "
