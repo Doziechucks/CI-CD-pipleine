@@ -2,20 +2,24 @@ name: Deploy to EC2
 on:
   push:
     branches: [ "main" ]
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
-        
+        uses: actions/checkout@v4
+      
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+      
       - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_KEY }}
-          script: |
+        run: |
+          ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'ENDSSH'
             set -e
             APP_DIR=~/app
             SERVICE_NAME=myapp
@@ -56,20 +60,20 @@ jobs:
             echo "Creating systemd service file..."
             if [ ! -f /etc/systemd/system/$SERVICE_NAME.service ]; then
               sudo bash -c "cat > /etc/systemd/system/$SERVICE_NAME.service" << 'SERVICEEOF'
-            [Unit]
-            Description=Flask App
-            After=network.target
-            
-            [Service]
-            User=ubuntu
-            WorkingDirectory=/home/ubuntu/app
-            Environment="PATH=/home/ubuntu/app/venv/bin"
-            ExecStart=/home/ubuntu/app/venv/bin/gunicorn -b 0.0.0.0:8080 app:app
-            Restart=always
-            
-            [Install]
-            WantedBy=multi-user.target
-            SERVICEEOF
+          [Unit]
+          Description=Flask App
+          After=network.target
+          
+          [Service]
+          User=ubuntu
+          WorkingDirectory=/home/ubuntu/app
+          Environment="PATH=/home/ubuntu/app/venv/bin"
+          ExecStart=/home/ubuntu/app/venv/bin/gunicorn -b 0.0.0.0:8080 app:app
+          Restart=always
+          
+          [Install]
+          WantedBy=multi-user.target
+          SERVICEEOF
               sudo systemctl daemon-reload
               sudo systemctl enable $SERVICE_NAME
             fi
@@ -80,5 +84,5 @@ jobs:
             echo "Checking service status..."
             sudo systemctl status $SERVICE_NAME --no-pager
             
-            
             echo "Deployment completed successfully!"
+          ENDSSH
