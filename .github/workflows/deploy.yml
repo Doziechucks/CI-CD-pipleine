@@ -1,17 +1,14 @@
 name: Deploy to EC2
-
 on:
   push:
     branches: [ "main" ]
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-
+        
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -19,51 +16,68 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_KEY }}
           script: |
+            set -e
             APP_DIR=~/app
             SERVICE_NAME=myapp
             REPO_URL=https://github.com/Doziechucks/CI-CD-pipeline.git
             VENV_DIR=$APP_DIR/venv
-
+            
+            echo "Creating app directory..."
             mkdir -p $APP_DIR
             cd $APP_DIR
-
+            
+            echo "Updating system packages..."
             sudo apt update
             sudo apt install -y python3-venv python3-pip git
-
+            
+            echo "Cloning/updating repository..."
             if [ -d .git ]; then
               git reset --hard
-              git pull
+              git pull origin main
             else
               git clone $REPO_URL .
             fi
-
+            
+            echo "Setting up Python virtual environment..."
             if [ ! -d "$VENV_DIR" ]; then
               python3 -m venv $VENV_DIR
             fi
-
             source $VENV_DIR/bin/activate
-
             pip install --upgrade pip
-            pip install -r requirements.txt
-
+            
+            echo "Installing Python dependencies..."
+            if [ -f requirements.txt ]; then
+              pip install -r requirements.txt
+            else
+              echo "No requirements.txt found, installing gunicorn..."
+              pip install gunicorn flask
+            fi
+            
+            echo "Creating systemd service file..."
             if [ ! -f /etc/systemd/system/$SERVICE_NAME.service ]; then
-              sudo tee /etc/systemd/system/$SERVICE_NAME.service > /dev/null <<EOF
-[Unit]
-Description=Flask App
-After=network.target
-
-[Service]
-User=ubuntu
-WorkingDirectory=$APP_DIR
-Environment="PATH=$VENV_DIR/bin"
-ExecStart=$VENV_DIR/bin/gunicorn -b 0.0.0.0:8080 app:app
-
-[Install]
-WantedBy=multi-user.target
-EOF
+              sudo bash -c "cat > /etc/systemd/system/$SERVICE_NAME.service" << 'SERVICEEOF'
+            [Unit]
+            Description=Flask App
+            After=network.target
+            
+            [Service]
+            User=ubuntu
+            WorkingDirectory=/home/ubuntu/app
+            Environment="PATH=/home/ubuntu/app/venv/bin"
+            ExecStart=/home/ubuntu/app/venv/bin/gunicorn -b 0.0.0.0:8080 app:app
+            Restart=always
+            
+            [Install]
+            WantedBy=multi-user.target
+            SERVICEEOF
               sudo systemctl daemon-reload
               sudo systemctl enable $SERVICE_NAME
             fi
-
+            
+            echo "Restarting service..."
             sudo systemctl restart $SERVICE_NAME
+            
+            echo "Checking service status..."
             sudo systemctl status $SERVICE_NAME --no-pager
+            
+            echo "Deployment completed successfully!"
