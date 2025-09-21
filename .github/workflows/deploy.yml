@@ -10,56 +10,93 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      - name: Setup SSH
+      - name: Test SSH Connection
         run: |
+          # Create SSH directory
           mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
-      
-      - name: Deploy via SSH
+          chmod 700 ~/.ssh
+          
+          # Create private key file
+          echo "${{ secrets.EC2_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          
+          # Test the key format
+          echo "Testing SSH key format..."
+          file ~/.ssh/deploy_key
+          head -1 ~/.ssh/deploy_key
+          tail -1 ~/.ssh/deploy_key
+          
+          # Add host to known_hosts
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+          
+          # Test connection
+          echo "Testing SSH connection..."
+          ssh -i ~/.ssh/deploy_key -o ConnectTimeout=10 -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "echo 'Connection successful'; whoami; pwd"
+
+      - name: Deploy Application
         run: |
-          ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'ENDSSH'
-            set -e
-            APP_DIR=~/app
-            SERVICE_NAME=myapp
-            REPO_URL=https://github.com/Doziechucks/CI-CD-pipeline.git
-            VENV_DIR=$APP_DIR/venv
-            
-            echo "Creating app directory..."
-            mkdir -p $APP_DIR
-            cd $APP_DIR
-            
-            echo "Updating system packages..."
-            sudo apt update
-            sudo apt install -y python3-venv python3-pip git
-            
-            echo "Cloning/updating repository..."
-            if [ -d .git ]; then
-              git reset --hard
-              git pull origin main
-            else
-              git clone $REPO_URL .
-            fi
-            
-            echo "Setting up Python virtual environment..."
-            if [ ! -d "$VENV_DIR" ]; then
-              python3 -m venv $VENV_DIR
-            fi
-            source $VENV_DIR/bin/activate
-            pip install --upgrade pip
-            
-            echo "Installing Python dependencies..."
-            if [ -f requirements.txt ]; then
-              pip install -r requirements.txt
-            else
-              echo "No requirements.txt found, installing gunicorn..."
-              pip install gunicorn flask
-            fi
-            
-            echo "Creating systemd service file..."
-            if [ ! -f /etc/systemd/system/$SERVICE_NAME.service ]; then
-              sudo bash -c "cat > /etc/systemd/system/$SERVICE_NAME.service" << 'SERVICEEOF'
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -T ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
+          set -e
+          
+          echo "=== Starting Deployment ==="
+          
+          # Variables
+          APP_DIR=~/app
+          SERVICE_NAME=myapp
+          REPO_URL=https://github.com/Doziechucks/CI-CD-pipeline.git
+          VENV_DIR=$APP_DIR/venv
+          
+          # Create app directory
+          echo "Creating app directory..."
+          mkdir -p $APP_DIR
+          cd $APP_DIR
+          
+          # Update system
+          echo "Updating system..."
+          sudo apt update -y
+          sudo apt install -y python3-venv python3-pip git nginx
+          
+          # Clone/update repository
+          echo "Getting latest code..."
+          if [ -d .git ]; then
+            git pull origin main || echo "Git pull failed, trying reset..."
+            git fetch origin
+            git reset --hard origin/main
+          else
+            git clone $REPO_URL .
+          fi
+          
+          # Setup Python environment
+          echo "Setting up Python environment..."
+          python3 -m venv $VENV_DIR
+          source $VENV_DIR/bin/activate
+          pip install --upgrade pip
+          
+          # Install dependencies
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install flask gunicorn
+          fi
+          
+          # Create simple Flask app if it doesn't exist
+          if [ ! -f app.py ]; then
+            cat > app.py << 'PYEOF'
+          from flask import Flask
+          app = Flask(__name__)
+          
+          @app.route('/')
+          def hello():
+              return '<h1>Chiedozie CI/CD Pipeline Test</h1><p>Deployment successful!</p>'
+          
+          if __name__ == '__main__':
+              app.run(host='0.0.0.0', port=8080)
+          PYEOF
+          fi
+          
+          # Create systemd service
+          echo "Creating systemd service..."
+          sudo tee /etc/systemd/system/$SERVICE_NAME.service > /dev/null << 'SERVICEEOF'
           [Unit]
           Description=Flask App
           After=network.target
@@ -68,21 +105,22 @@ jobs:
           User=ubuntu
           WorkingDirectory=/home/ubuntu/app
           Environment="PATH=/home/ubuntu/app/venv/bin"
-          ExecStart=/home/ubuntu/app/venv/bin/gunicorn -b 0.0.0.0:8080 app:app
+          ExecStart=/home/ubuntu/app/venv/bin/gunicorn -w 4 -b 0.0.0.0:8080 app:app
           Restart=always
+          RestartSec=3
           
           [Install]
           WantedBy=multi-user.target
           SERVICEEOF
-              sudo systemctl daemon-reload
-              sudo systemctl enable $SERVICE_NAME
-            fi
-            
-            echo "Restarting service..."
-            sudo systemctl restart $SERVICE_NAME
-            
-            echo "Checking service status..."
-            sudo systemctl status $SERVICE_NAME --no-pager
-            
-            echo "Deployment completed successfully!"
-          ENDSSH
+          
+          # Reload and restart service
+          sudo systemctl daemon-reload
+          sudo systemctl enable $SERVICE_NAME
+          sudo systemctl restart $SERVICE_NAME
+          
+          # Check service status
+          echo "Service status:"
+          sudo systemctl status $SERVICE_NAME --no-pager
+          
+          echo "=== Deployment Complete ==="
+          EOF
