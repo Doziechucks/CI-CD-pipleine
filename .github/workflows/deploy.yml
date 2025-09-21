@@ -1,24 +1,9 @@
-   name: Deploy Flask App to EC2
+name: Test Workflow
 
-on:
-  push:
-    branches: [ main ]
+on: [push]
 
 jobs:
-  deploy:
+  test:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Test application
-      run: echo "Test passed"
-    
-    - name: Deploy to EC2
-      uses: appleboy/ssh-action@v1.0.3
-      with:
-        host: ${{ secrets.EC2_HOST }}
-        username: ubuntu
-        key: ${{ secrets.EC2_SSH_KEY }}
-        port: 22
-        script: echo "Deployment successful"
+      - run: echo "Hello World"
