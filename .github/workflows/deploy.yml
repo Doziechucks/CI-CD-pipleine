@@ -30,16 +30,16 @@ jobs:
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v0.1.7
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ubuntu            # or your deployment user
-          key: ${{ secrets.EC2_SSH_KEY }}
+          host: ${{ secrets.EC2_HOST }}      # Your EC2 public IP
+          username: ubuntu                   # Or your deployment user
+          key: ${{ secrets.EC2_SSH_KEY }}    # Your private key
           port: 22
           script: |
             # Navigate to your app directory on EC2
             cd /home/ubuntu/app || mkdir -p /home/ubuntu/app
-            # Pull latest code
+            # Initialize git repo if not already
             git init
-            git remote add origin https://github.com/<your-username>/<your-repo>.git || true
+            git remote add origin https://github.com/Doziechucks/CI-CD-pipleine.git || true
             git fetch origin
             git reset --hard origin/main
             # Setup virtual environment
