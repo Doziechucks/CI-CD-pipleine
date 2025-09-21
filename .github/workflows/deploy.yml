@@ -80,4 +80,5 @@ jobs:
             echo "Checking service status..."
             sudo systemctl status $SERVICE_NAME --no-pager
             
+            
             echo "Deployment completed successfully!"
